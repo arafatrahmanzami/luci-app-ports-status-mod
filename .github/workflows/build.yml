@@ -13,43 +13,46 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - release: '24.10.5'
-            arch: aarch64_cortex-a53
-            target: mediatek/filogic
-          - release: '25.12.5'
-            arch: mips_24kc
-            target: ath79/generic
+          - arch: aarch64_cortex-a53
+            version: '24.10.5'
+          - arch: mips_24kc
+            version: '25.12.5'
     steps:
       - uses: actions/checkout@v4
-      - name: Build with OpenWrt SDK
+
+      - name: Build packages
         uses: openwrt/gh-action-sdk@main
         env:
-          ARCH: ${{ matrix.arch }}
-          TARGET: ${{ matrix.target }}
-          VERSION: ${{ matrix.release }}
+          ARCH: ${{ matrix.arch }}-${{ matrix.version }}
+          FEEDNAME: ports
           PACKAGES: luci-app-ports-status-mod
+
       - name: Collect artifacts
         run: |
-          mkdir -p artifacts
-          find bin/packages -name 'luci-app-ports-status-mod*' -exec cp {} artifacts/ \; || true
-          ls -la artifacts/
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+          mkdir -p ./artifacts
+          find . -name '*.ipk' -exec cp {} ./artifacts/ \; 2>/dev/null || true
+          find . -name '*.apk' -exec cp {} ./artifacts/ \; 2>/dev/null || true
+          ls -la ./artifacts/
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: pkg-${{ matrix.arch }}
-          path: artifacts/*
+          name: pkg-${{ matrix.arch }}-${{ matrix.version }}
+          path: ./artifacts/*
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: ./artifacts
+
+      - run: find ./artifacts -type f
+
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: artifacts/**/*
+          files: ./artifacts/**/*
