@@ -1,0 +1,15 @@
+{
+    "luci-app-ports-status-mod": {
+        "description": "Grant access to ports-status-mod RPC methods",
+        "read": {
+            "ubus": {
+                "ports-status-mod": [ "getPortsStatus" ]
+            }
+        },
+        "write": {
+            "ubus": {
+                "ports-status-mod": [ "setPortStatus" ]
+            }
+        }
+    }
+}

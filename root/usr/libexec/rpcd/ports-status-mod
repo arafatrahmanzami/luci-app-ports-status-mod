@@ -1,0 +1,146 @@
+#!/bin/sh
+. /usr/share/libubox/jshn.sh
+
+STATE_FILE="/etc/ports_status"
+CACHE_FILE="/tmp/.ports_status_cache"
+PREV_FILE="/tmp/.ports_prev_counters"
+CACHE_TTL=3
+
+SWCONFIG_DEV=""
+if [ -x /sbin/swconfig ] || [ -x /usr/sbin/swconfig ]; then
+    SWCONFIG_DEV=$(swconfig list 2>/dev/null | grep -oE 'switch[0-9]+' | head -1)
+fi
+
+is_admin_disabled() {
+    [ -s "$STATE_FILE" ] && grep -qx "$1" "$STATE_FILE" 2>/dev/null
+}
+
+get_swconfig_status() {
+    local swdev="$1"
+    swconfig dev "$swdev" show 2>/dev/null | awk '
+    /^Port [0-9]+:/ {
+        if (have) printf "%s|%s|%d\n", port, link, speed
+        port = $2; gsub(/:/, "", port)
+        link = "down"; speed = 0; have = 1
+        next
+    }
+    /^VLAN/ {
+        if (have) { printf "%s|%s|%d\n", port, link, speed; have = 0 }
+        next
+    }
+    have {
+        if ($0 ~ /link: ?up/ || $0 ~ /status: ?up/) link = "up"
+        if (match($0, /speed:[0-9]+/)) { s = substr($0, RSTART+6, RLENGTH-6); speed = s+0 }
+    }
+    END { if (have) printf "%s|%s|%d\n", port, link, speed }
+    '
+}
+
+get_dsa_ports_status() {
+    awk 'NR>2 { gsub(/:/,"",$1); print $1, $2, $10 }' /proc/net/dev > /tmp/.ps_current 2>/dev/null
+
+    json_init
+    for netdir in /sys/class/net/*; do
+        port="${netdir##*/}"
+        case "$port" in
+            lo|br-*|wlan*|sit*|gre*|ppp*|tun*|tap*|docker*|veth*|ifb*|phy*|bat*|bond*|*macvlan*) continue ;;
+        esac
+
+        if is_admin_disabled "$port"; then
+            json_add_string "$port" "disabled"
+            continue
+        fi
+
+        operstate=""
+        [ -r "$netdir/operstate" ] && read -r operstate < "$netdir/operstate"
+
+        case "$operstate" in
+            up)
+                cur_rx=$(awk -v p="$port" '$1==p{print $2;exit}' /tmp/.ps_current)
+                cur_tx=$(awk -v p="$port" '$1==p{print $3;exit}' /tmp/.ps_current)
+                prev_rx=$(awk -v p="$port" '$1==p{print $2;exit}' "$PREV_FILE" 2>/dev/null)
+                prev_tx=$(awk -v p="$port" '$1==p{print $3;exit}' "$PREV_FILE" 2>/dev/null)
+                if [ -z "$prev_rx" ] || [ -z "$prev_tx" ]; then
+                    json_add_string "$port" "idle"
+                elif [ "$cur_rx" != "$prev_rx" ] || [ "$cur_tx" != "$prev_tx" ]; then
+                    json_add_string "$port" "active"
+                else
+                    json_add_string "$port" "idle"
+                fi
+                ;;
+            down) json_add_string "$port" "down" ;;
+            *)    json_add_string "$port" "unknown" ;;
+        esac
+    done
+
+    cp /tmp/.ps_current "$PREV_FILE" 2>/dev/null
+    rm -f /tmp/.ps_current
+    json_dump
+}
+
+get_swconfig_json() {
+    json_init
+    local port_data
+    port_data=$(get_swconfig_status "$SWCONFIG_DEV")
+
+    echo "$port_data" | while IFS='|' read -r pnum link speed; do
+        [ -z "$pnum" ] && continue
+        key="port${pnum}"
+        if is_admin_disabled "$key"; then
+            json_add_string "$key" "disabled"
+        elif [ "$link" = "up" ]; then
+            json_add_string "$key" "active"
+        else
+            json_add_string "$key" "down"
+        fi
+    done
+    json_dump
+}
+
+set_port_status() {
+    local port="$1" status="$2"
+    touch "$STATE_FILE"
+    if [ "$status" = "down" ]; then
+        grep -qx "$port" "$STATE_FILE" || echo "$port" >> "$STATE_FILE"
+        rm -f "$CACHE_FILE" "$PREV_FILE"
+        json_init; json_add_boolean "success" 1; json_dump
+    elif [ "$status" = "up" ]; then
+        grep -vx "$port" "$STATE_FILE" > "$STATE_FILE.tmp" 2>/dev/null
+        mv "$STATE_FILE.tmp" "$STATE_FILE" 2>/dev/null
+        rm -f "$CACHE_FILE" "$PREV_FILE"
+        json_init; json_add_boolean "success" 1; json_dump
+    else
+        json_init; json_add_boolean "success" 0; json_dump
+    fi
+}
+
+if [ -f "$CACHE_FILE" ]; then
+    now=$(date +%s)
+    mtime=$(date +%s -r "$CACHE_FILE" 2>/dev/null || echo 0)
+    if [ "$mtime" -gt 0 ] && [ $((now - mtime)) -lt $CACHE_TTL ]; then
+        cat "$CACHE_FILE"
+        exit 0
+    fi
+fi
+
+case "$1" in
+    list)
+        echo '{"getPortsStatus":{},"setPortStatus":{"port":"String","status":"String"}}'
+        ;;
+    call)
+        case "$2" in
+            getPortsStatus)
+                if [ -n "$SWCONFIG_DEV" ]; then
+                    out=$(get_swconfig_json)
+                else
+                    out=$(get_dsa_ports_status)
+                fi
+                echo "$out" > "$CACHE_FILE"
+                echo "$out"
+                ;;
+            setPortStatus)
+                set_port_status "$3" "$4"
+                ;;
+        esac
+        ;;
+esac

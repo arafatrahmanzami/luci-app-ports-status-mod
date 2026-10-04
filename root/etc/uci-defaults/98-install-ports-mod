@@ -1,0 +1,32 @@
+#!/bin/sh
+# Install custom 29_ports.js over the stock LuCI file.
+# Runs on every package install/upgrade.
+# Source: /usr/share/luci-app-ports-status-mod/29_ports.js (private)
+# Target: /www/luci-static/resources/view/status/include/29_ports.js
+
+SRC="/usr/share/luci-app-ports-status-mod/29_ports.js"
+DIR="/www/luci-static/resources/view/status/include"
+STOCK="$DIR/29_ports.js"
+BACKUP="$DIR/29_ports.bak"
+
+# Clean up any leftover from previous packaging bug
+rm -f "$DIR/29_ports_custom.js"
+
+# Make sure include dir exists
+mkdir -p "$DIR"
+
+# Back up the stock file once (only if it isn't ours already)
+if [ -f "$STOCK" ] && [ ! -f "$BACKUP" ]; then
+    cp "$STOCK" "$BACKUP"
+fi
+
+# Install our custom file
+if [ -f "$SRC" ]; then
+    cp "$SRC" "$STOCK"
+    chmod 644 "$STOCK"
+fi
+
+# Clear LuCI cache
+rm -f /tmp/luci-indexcache /tmp/luci-modulecache* /tmp/luci-*cache* 2>/dev/null
+
+exit 0

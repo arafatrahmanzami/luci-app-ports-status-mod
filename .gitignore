@@ -1,0 +1,16 @@
+*.ipk
+*.apk
+*.tar.gz
+*.tar.zst
+bin/
+build_dir/
+staging_dir/
+tmp/
+dl/
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+*.swp
+*~
+*.before-*-patch

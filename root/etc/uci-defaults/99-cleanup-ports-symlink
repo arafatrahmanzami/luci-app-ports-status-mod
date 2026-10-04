@@ -1,0 +1,15 @@
+#!/bin/sh
+# Safe cleanup: only remove the file if it is a SYMLINK.
+# Never delete a real config file.
+CONFIG_FILE="/etc/user_defined_ports.json"
+
+if [ -L "$CONFIG_FILE" ]; then
+    rm -f "$CONFIG_FILE"
+fi
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    touch "$CONFIG_FILE"
+    chmod 666 "$CONFIG_FILE"
+fi
+
+exit 0
