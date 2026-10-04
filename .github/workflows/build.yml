@@ -30,8 +30,8 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p ./artifacts
-          find . -name '*.ipk' -exec cp {} ./artifacts/ \; 2>/dev/null || true
-          find . -name '*.apk' -exec cp {} ./artifacts/ \; 2>/dev/null || true
+          find . -name 'luci-app-ports-status-mod*.ipk' -exec cp {} ./artifacts/ \; 2>/dev/null || true
+          find . -name 'luci-app-ports-status-mod*.apk' -exec cp {} ./artifacts/ \; 2>/dev/null || true
           ls -la ./artifacts/
 
       - uses: actions/upload-artifact@v4
