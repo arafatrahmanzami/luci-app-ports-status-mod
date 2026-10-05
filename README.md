@@ -28,17 +28,17 @@ This plugin replaces that widget with one that:
 
 ## You need this if:
 
-✅ You have a router with multiple Ethernet ports and want to identify them at a glance
-✅ You want to see live upload/download speed per port
-✅ You want a clean, labeled view of your WAN / LAN / trunk ports
-✅ You want to enable or disable individual LAN ports from the UI
-✅ You want to see hardware details (link speed, duplex, MAC) of each port
+- ✅ You have a router with multiple Ethernet ports and want to identify them at a glance
+- ✅ You want to see live upload/download speed per port
+- ✅ You want a clean, labeled view of your WAN / LAN / trunk ports
+- ✅ You want to enable or disable individual LAN ports from the UI
+- ✅ You want to see hardware details (link speed, duplex, MAC) of each port
 
 ## You don't need this if:
 
-❌ You have only one Ethernet port and don't care about labels
-❌ You never look at the Status → Overview page
-❌ You're happy with the stock OpenWrt port widget
+- ❌ You have only one Ethernet port and don't care about labels
+- ❌ You never look at the Status → Overview page
+- ❌ You're happy with the stock OpenWrt port widget
 
 ## Table of Contents
 
