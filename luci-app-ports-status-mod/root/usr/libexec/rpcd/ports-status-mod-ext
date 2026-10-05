@@ -1,0 +1,170 @@
+#!/bin/sh
+. /usr/share/libubox/jshn.sh
+# Extension methods for luci-app-ports-status-mod
+# Feature 1: real-time Rx/Tx rate
+# Feature 2: SFP module diagnostics
+# Feature 3: PoE status
+# Feature 4: full port details via ethtool
+
+ext_get_port_speed() {
+    local ts_file=/tmp/.ps_speed_ts
+    local prev_file=/tmp/.ps_speed_prev
+    local now=$(date +%s)
+
+    awk 'NR>2 { gsub(/:/,"",$1); print $1, $2, $10 }' /proc/net/dev > /tmp/.ps_speed_cur 2>/dev/null
+
+    json_init
+
+    if [ -f "$prev_file" ] && [ -f "$ts_file" ]; then
+        local last_ts=$(cat "$ts_file")
+        local dt=$((now - last_ts))
+        [ "$dt" -lt 1 ] && dt=1
+
+        for netdir in /sys/class/net/*; do
+            port="${netdir##*/}"
+            case "$port" in
+                lo|br-*|wlan*|phy*|bat*|*macvlan*|docker*|veth*) continue ;;
+            esac
+            rx1=$(awk -v p="$port" '$1==p{print $2;exit}' "$prev_file")
+            rx2=$(awk -v p="$port" '$1==p{print $2;exit}' /tmp/.ps_speed_cur)
+            tx1=$(awk -v p="$port" '$1==p{print $3;exit}' "$prev_file")
+            tx2=$(awk -v p="$port" '$1==p{print $3;exit}' /tmp/.ps_speed_cur)
+            rx=$(( (${rx2:-0} - ${rx1:-0}) / dt ))
+            tx=$(( (${tx2:-0} - ${tx1:-0}) / dt ))
+            [ "$rx" -lt 0 ] && rx=0
+            [ "$tx" -lt 0 ] && tx=0
+            json_add_int "$port" "$((rx + tx))"
+            json_add_int "${port}_rx" "$rx"
+            json_add_int "${port}_tx" "$tx"
+        done
+    else
+        for netdir in /sys/class/net/*; do
+            port="${netdir##*/}"
+            case "$port" in
+                lo|br-*|wlan*|phy*|bat*|*macvlan*|docker*|veth*) continue ;;
+            esac
+            json_add_int "$port" 0
+            json_add_int "${port}_rx" 0
+            json_add_int "${port}_tx" 0
+        done
+    fi
+
+    cp /tmp/.ps_speed_cur "$prev_file"
+    echo "$now" > "$ts_file"
+    json_dump
+}
+
+ext_get_sfp_info() {
+    json_init
+    for netdir in /sys/class/net/*; do
+        port="${netdir##*/}"
+        case "$port" in
+            lo|br-*|wlan*|phy*|bat*|*macvlan*) continue ;;
+        esac
+        if command -v ethtool >/dev/null 2>&1; then
+            mod_info=$(ethtool --module-info "$port" 2>/dev/null)
+            if [ -n "$mod_info" ]; then
+                temp=$(echo "$mod_info" | grep -iE 'Temperature' | grep -oE '[-0-9.]+' | head -1)
+                volt=$(echo "$mod_info" | grep -iE 'Voltage' | grep -oE '[0-9.]+' | head -1)
+                txbias=$(echo "$mod_info" | grep -iE 'TX bias|Bias' | grep -oE '[0-9.]+' | head -1)
+                txpwr=$(echo "$mod_info" | grep -iE 'Laser output|TX power' | grep -oE '[-0-9.]+' | head -1)
+                rxpwr=$(echo "$mod_info" | grep -iE 'Receiver signal|RX power' | grep -oE '[-0-9.]+' | head -1)
+                json_add_object "$port"
+                [ -n "$temp" ] && json_add_string "temperature" "$temp C"
+                [ -n "$volt" ] && json_add_string "voltage" "$volt V"
+                [ -n "$txbias" ] && json_add_string "tx_bias" "$txbias mA"
+                [ -n "$txpwr" ] && json_add_string "tx_power" "$txpwr dBm"
+                [ -n "$rxpwr" ] && json_add_string "rx_power" "$rxpwr dBm"
+                json_close_object
+            fi
+        fi
+    done
+    json_dump
+}
+
+ext_get_poe_status() {
+    json_init
+    if ubus list 2>/dev/null | grep -q '^poe$'; then
+        poe_out=$(ubus call poe status 2>/dev/null)
+        if [ -n "$poe_out" ]; then
+            json_load "$poe_out"
+            json_dump
+            return
+        fi
+    fi
+    if command -v ethtool >/dev/null 2>&1; then
+        for netdir in /sys/class/net/*; do
+            port="${netdir##*/}"
+            case "$port" in
+                lo|br-*|wlan*|phy*|bat*|*macvlan*) continue ;;
+            esac
+            poe_line=$(ethtool --show-poe "$port" 2>/dev/null | grep -iE 'detection|class|power' | head -3)
+            if [ -n "$poe_line" ]; then
+                json_add_string "$port" "supported"
+            fi
+        done
+    fi
+    json_dump
+}
+
+ext_get_port_details() {
+    local port=""
+    # rpcd sends params as JSON on stdin; fall back to $1 if called directly
+    if [ -t 0 ] || [ ! -r /dev/stdin ]; then
+        port="$1"
+    else
+        local stdin_json
+        stdin_json=$(cat 2>/dev/null)
+        if [ -n "$stdin_json" ]; then
+            json_load "$stdin_json" 2>/dev/null
+            json_get_var port "port"
+            json_cleanup
+        fi
+        [ -z "$port" ] && port="$1"
+    fi
+
+    json_init
+    speed=$(cat /sys/class/net/$port/speed 2>/dev/null)
+    duplex=$(cat /sys/class/net/$port/duplex 2>/dev/null)
+    carrier=$(cat /sys/class/net/$port/carrier 2>/dev/null)
+    mtu=$(cat /sys/class/net/$port/mtu 2>/dev/null)
+    mac=$(cat /sys/class/net/$port/address 2>/dev/null)
+    operstate=$(cat /sys/class/net/$port/operstate 2>/dev/null)
+    json_add_string "speed" "${speed:-unknown}"
+    json_add_string "duplex" "${duplex:-unknown}"
+    json_add_string "carrier" "${carrier:-0}"
+    json_add_string "mtu" "${mtu:-unknown}"
+    json_add_string "mac" "${mac:-unknown}"
+    json_add_string "operstate" "${operstate:-unknown}"
+    if command -v ethtool >/dev/null 2>&1; then
+        json_add_object "stats"
+        ethtool -S "$port" 2>/dev/null | awk -F: '
+            /rx_packets|tx_packets|rx_bytes|tx_bytes|rx_errors|tx_errors|rx_dropped|tx_dropped|collisions|multicast|rx_crc|tx_aborted/ {
+                key=$1; val=$2;
+                gsub(/^[ \t]+|[ \t]+$/, "", key);
+                gsub(/^[ \t]+|[ \t]+$/, "", val);
+                gsub(/[^a-zA-Z0-9_]/, "_", key);
+                printf "%s=%s\n", key, val
+            }' | while IFS='=' read -r k v; do
+                [ -n "$k" ] && [ -n "$v" ] && json_add_string "$k" "$v"
+            done
+        json_close_object
+    fi
+    json_dump
+}
+
+case "$1" in
+    list)
+        cat << 'JSON'
+{"getPortSpeed":{},"getSfpInfo":{},"getPoeStatus":{},"getPortDetails":{"port":"String"}}
+JSON
+        ;;
+    call)
+        case "$2" in
+            getPortSpeed)    ext_get_port_speed ;;
+            getSfpInfo)      ext_get_sfp_info ;;
+            getPoeStatus)    ext_get_poe_status ;;
+            getPortDetails)  ext_get_port_details "$3" ;;
+        esac
+        ;;
+esac

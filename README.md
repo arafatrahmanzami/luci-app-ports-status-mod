@@ -276,3 +276,30 @@ This fork: Arafat Rahman Zami - auto-detection, swconfig support, single-port fa
 ## License
 
 MIT (c) 2026 Arafat Rahman Zami
+
+## Port Details Modal
+
+Click the small circular **i** button in the top-right of any port card to open a detailed view:
+
+- Link speed (Mb/s), duplex, operstate, carrier, MTU, MAC
+- SFP module diagnostics (temperature, voltage, TX bias, TX/RX power) — shown only on SFP-capable ports
+- PoE status detection — shown only on PoE-capable hardware
+- ethtool hardware statistics — errors, dropped packets, collisions (requires `ethtool` package)
+
+## Real-Time Speed
+
+Each port card shows live Rx/Tx rate:
+
+    ▲ 1.2 MB/s
+    ▼ 47.6 MB/s
+
+Updates every 3 seconds. The value is cached in the browser so it never flashes `--` during LuCI re-renders.
+
+To install the optional `ethtool` package for extended hardware stats:
+
+    # OpenWrt 24.10.x
+    opkg install ethtool
+
+    # OpenWrt 25.12.x
+    apk add ethtool
+

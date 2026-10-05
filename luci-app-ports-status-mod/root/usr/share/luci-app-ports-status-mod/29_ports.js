@@ -58,12 +58,39 @@ var callSetPortStatus = rpc.declare({
 	expect: { }
 });
 
+var callGetPortSpeed = rpc.declare({
+	object: 'ports-status-mod-ext',
+	method: 'getPortSpeed',
+	expect: { }
+});
+
+var callGetSfpInfo = rpc.declare({
+	object: 'ports-status-mod-ext',
+	method: 'getSfpInfo',
+	expect: { }
+});
+
+var callGetPoeStatus = rpc.declare({
+	object: 'ports-status-mod-ext',
+	method: 'getPoeStatus',
+	expect: { }
+});
+
+var callGetPortDetails = rpc.declare({
+	object: 'ports-status-mod-ext',
+	method: 'getPortDetails',
+	params: ['port'],
+	expect: { }
+});
+
 var USER_PORTS_FILE = '/etc/user_defined_ports.json';
 var USER_PORTS_BACKUP = '/etc/user_defined_ports.json.bak';
 var CONFIG_LOCK = false;
 var isDragging = false;
 var draggedElement = null;
 var originalPorts = [];
+var _speedCache = {};
+var _speedTimerStarted = false;
 
 var _portsStatusTimer = null;
 
@@ -1051,6 +1078,97 @@ function showEditLabelModal(port, labelElement, descriptionElement, statusElemen
 	descriptionInputEl.addEventListener('keydown', handleKeydown);
 }
 
+function showDetailsModal(port) {
+	poll.stop();
+	ui.showModal(_('Port Details') + ': ' + port.device, [
+		E('p', { 'class': 'spinning' }, _('Loading...'))
+	]);
+
+	L.resolveDefault(callGetPortDetails(port.device), {}).then(function(d) {
+		var rows = [
+			[_('Interface'), port.device],
+			[_('Link speed'), d.speed && d.speed !== 'unknown' ? d.speed + ' Mb/s' : _('unknown')],
+			[_('Duplex'), d.duplex || _('unknown')],
+			[_('Operstate'), d.operstate || _('unknown')],
+			[_('Carrier'), d.carrier === '1' ? _('present') : _('absent')],
+			[_('MTU'), d.mtu || _('unknown')],
+			[_('MAC'), d.mac || _('unknown')]
+		];
+
+		var content = [
+			E('table', { 'class': 'table' }, rows.map(function(r) {
+				return E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td left', 'style': 'width:35%' }, r[0]),
+					E('td', { 'class': 'td left' }, r[1])
+				]);
+			}))
+		];
+
+		// ethtool stats
+		if (d.stats && Object.keys(d.stats).length > 0) {
+			content.push(E('h4', {}, _('Hardware statistics')));
+			var statRows = Object.keys(d.stats).slice(0, 20).map(function(k) {
+				return E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td left' }, k),
+					E('td', { 'class': 'td left' }, d.stats[k])
+				]);
+			});
+			content.push(E('table', { 'class': 'table' }, statRows));
+		}
+
+		// SFP and PoE (async)
+		content.push(E('div', { 'id': 'extra-details' }, E('p', { 'class': 'spinning' }, _('Checking SFP / PoE...'))));
+
+		ui.showModal(_('Port Details') + ': ' + port.device, content.concat([
+			E('div', { 'class': 'right' }, [
+				E('button', {
+					'class': 'cbi-button cbi-button-neutral',
+					'click': function() { ui.hideModal(); poll.start(); }
+				}, _('Close'))
+			])
+		]));
+
+		var extra = [];
+
+		L.resolveDefault(callGetSfpInfo(), {}).then(function(sfp) {
+			if (sfp && sfp[port.device]) {
+				var s = sfp[port.device];
+				extra.push(E('h4', {}, _('SFP Module')));
+				var sfpRows = Object.keys(s).map(function(k) {
+					return E('tr', { 'class': 'tr' }, [
+						E('td', { 'class': 'td left' }, k),
+						E('td', { 'class': 'td left' }, s[k])
+					]);
+				});
+				extra.push(E('table', { 'class': 'table' }, sfpRows));
+			}
+			return L.resolveDefault(callGetPoeStatus(), {});
+		}).then(function(poe) {
+			if (poe && poe[port.device]) {
+				extra.push(E('h4', {}, _('PoE Status')));
+				extra.push(E('p', {}, _('This port is PoE-capable. Status: ') + poe[port.device]));
+			}
+			var el = document.getElementById('extra-details');
+			if (el) {
+				if (extra.length > 0) {
+					el.innerHTML = '';
+					extra.forEach(function(e) { el.appendChild(e); });
+				} else {
+					el.innerHTML = '';
+					el.appendChild(E('p', { 'style': 'color: var(--text-color-secondary);' }, _('No SFP or PoE data for this port.')));
+				}
+			}
+		});
+	}).catch(function(err) {
+		ui.showModal(_('Port Details'), [
+			E('p', { 'class': 'alert-message error' }, _('Failed to load details: ') + err.message),
+			E('div', { 'class': 'right' }, [
+				E('button', { 'class': 'cbi-button', 'click': function() { ui.hideModal(); poll.start(); } }, _('Close'))
+			])
+		]);
+	});
+}
+
 function makeEditable(element, descriptionElement, statusElement, port, ports) {
 	element.style.cursor = 'pointer';
 	element.title = _('Click to edit label');
@@ -1067,86 +1185,110 @@ function makeEditable(element, descriptionElement, statusElement, port, ports) {
 }
 
 function makeDraggable(element, port, container, ports) {
-    var dragHandle = E('div', {
-        'class': 'drag-handle',
-        'style': 'position: absolute; top: 0; left: 0; right: 0; bottom: 0; cursor: move; z-index: 1; pointer-events: none;',
-        'title': _('Hold to drag and reorder')
+    element.style.cursor = 'grab';
+    element.style.position = 'relative';
+    element.style.touchAction = 'pan-y';
+    element.setAttribute('draggable', 'false');
+
+    // Disable native image drag so pointerdrag works from icons too
+    element.addEventListener('dragstart', function(ev) { ev.preventDefault(); });
+    Array.prototype.slice.call(element.querySelectorAll('img')).forEach(function(img) {
+        img.setAttribute('draggable', 'false');
+        img.addEventListener('dragstart', function(ev) { ev.preventDefault(); });
     });
 
-    element.style.position = 'relative';
-    element.appendChild(dragHandle);
+    var state = null;
 
-    var clickTimer = null;
-    var clickStart = null;
-    var hasMoved = false;
-    var isTouch = false;
-
-    function startDrag(ev) {
-        isDragging = true;
-        draggedElement = element;
-        poll.stop();
-
-        element.style.opacity = '0.5';
-        element.style.zIndex = '1000';
-        dragHandle.style.cursor = 'move';
-        dragHandle.style.pointerEvents = 'auto';
-
-        document.body.style.cursor = 'move';
-
-        var placeholder = E('div', {
-            'class': 'ifacebox drag-placeholder',
-            'style': element.style.cssText + 'opacity: 0.3; border: 3px dashed var(--border-color-medium); background: var(--border-color-low);'
+    function getDragAfterElement(x) {
+        var candidates = Array.prototype.slice.call(container.querySelectorAll('.ifacebox')).filter(function(c) {
+            return c !== element && c !== state.placeholder;
         });
-
-        element.style.boxShadow = '0 5px 15px var(--border-color-strong)';
-
-        function onMouseMove(e) {
-            if (isTouch && e.cancelable) {
-                e.preventDefault();
-            }
-            
-            var clientX = e.clientX;
-            if (e.touches && e.touches.length > 0) {
-                clientX = e.touches[0].clientX;
-            }
-            
-            var afterElement = getDragAfterElement(container, clientX);
-            if (afterElement == null) {
-                container.appendChild(placeholder);
-            } else {
-                container.insertBefore(placeholder, afterElement);
+        var closest = { offset: -Infinity, element: null };
+        for (var i = 0; i < candidates.length; i++) {
+            var box = candidates[i].getBoundingClientRect();
+            var offset = x - box.left - box.width / 2;
+            if (offset < 0 && offset > closest.offset) {
+                closest = { offset: offset, element: candidates[i] };
             }
         }
+        return closest.element;
+    }
 
-        function onMouseUp(e) {
-            document.removeEventListener('mousemove', onMouseMove);
-            document.removeEventListener('mouseup', onMouseUp);
-            document.removeEventListener('touchmove', onMouseMove, { passive: false });
-            document.removeEventListener('touchend', onMouseUp);
+    function startDrag(ev) {
+        var clientX = ev.clientX;
+        var rect = element.getBoundingClientRect();
 
-            var clientX = e.clientX;
-            if (e.changedTouches && e.changedTouches.length > 0) {
-                clientX = e.changedTouches[0].clientX;
+        state = {
+            startX: clientX,
+            originX: clientX,
+            dragging: false,
+            pointerId: ev.pointerId,
+            placeholder: document.createElement('div')
+        };
+        state.placeholder.className = 'ifacebox drag-placeholder';
+        state.placeholder.style.cssText = 'opacity:0.25; border:2px dashed var(--border-color-medium); background:transparent;';
+        state.placeholder.style.minWidth = rect.width + 'px';
+        state.placeholder.style.minHeight = rect.height + 'px';
+        state.placeholder.style.margin = '.25em';
+
+        // NOTE: pointer capture is deferred until drag actually begins
+        // so clicks on label still reach the label handler
+    }
+
+    function moveDrag(ev) {
+        if (!state) return;
+        var dx = Math.abs(ev.clientX - state.startX);
+
+        if (!state.dragging) {
+            if (dx < 6) return;
+            // Begin drag — now safely capture the pointer
+            state.dragging = true;
+            if (element.setPointerCapture && state.pointerId !== undefined) {
+                try { element.setPointerCapture(state.pointerId); } catch(e) {}
             }
-            
-            var afterElement = getDragAfterElement(container, clientX);
-            if (afterElement == null) {
-                container.appendChild(element);
-            } else {
-                container.insertBefore(element, afterElement);
-            }
+            isDragging = true;
+            poll.stop();
+            element.parentNode.insertBefore(state.placeholder, element);
+            element.style.opacity = '0.7';
+            element.style.zIndex = '9999';
+            element.style.transform = 'scale(1.03)';
+            element.style.boxShadow = '0 6px 20px rgba(0,0,0,0.35)';
+            element.style.cursor = 'grabbing';
+            document.body.style.cursor = 'grabbing';
+            document.body.style.userSelect = 'none';
+        }
+        if (ev.cancelable) ev.preventDefault();
 
-            if (placeholder.parentNode)
-                placeholder.parentNode.removeChild(placeholder);
+        // Make the card literally follow the cursor
+        var dx2 = ev.clientX - state.originX;
+        element.style.transform = 'translateX(' + dx2 + 'px) scale(1.03)';
 
-            element.style.opacity = '1';
-            element.style.zIndex = '';
-            element.style.boxShadow = '';
-            dragHandle.style.cursor = 'move';
-            dragHandle.style.pointerEvents = 'none';
+        var after = getDragAfterElement(ev.clientX);
+        if (after == null)
+            container.appendChild(state.placeholder);
+        else
+            container.insertBefore(state.placeholder, after);
+    }
+
+    function endDrag(ev) {
+        if (!state) return;
+        if (state.dragging) {
+            container.insertBefore(element, state.placeholder);
+            state.placeholder.parentNode && state.placeholder.parentNode.removeChild(state.placeholder);
+
+            element.style.transition = 'transform 0.15s ease-out, opacity 0.15s';
+            element.style.transform = '';
+            setTimeout(function() {
+                element.style.opacity = '';
+                element.style.zIndex = '';
+                element.style.boxShadow = '';
+                element.style.transition = '';
+            }, 150);
+            element.style.cursor = 'grab';
             document.body.style.cursor = '';
+            document.body.style.userSelect = '';
 
-            var newOrder = Array.from(container.children).map(function(el) {
+            var newOrder = Array.prototype.slice.call(container.children).map(function(el) {
                 return el.__port__;
             }).filter(function(p) { return p; });
 
@@ -1154,115 +1296,38 @@ function makeDraggable(element, port, container, ports) {
             newOrder.forEach(function(p) { ports.push(p); });
 
             saveUserPorts(ports).then(function() {
+                showPortsStatusTimeout(_('Port order saved'), 3000);
+            }).catch(function() {}).finally(function() {
                 isDragging = false;
-                draggedElement = null;
-                isTouch = false;
-                showPortsStatusTimeout(_('Port order saved'), 4000);
-                poll.start();
-            }).catch(function(err) {
-                isDragging = false;
-                draggedElement = null;
-                isTouch = false;
+                state = null;
                 poll.start();
             });
+        } else {
+            state = null;
         }
-
-        document.addEventListener('mousemove', onMouseMove);
-        document.addEventListener('mouseup', onMouseUp);
-        document.addEventListener('touchmove', onMouseMove, { passive: false });
-        document.addEventListener('touchend', onMouseUp);
+        if (ev && ev.pointerId !== undefined && element.releasePointerCapture) {
+            try { element.releasePointerCapture(ev.pointerId); } catch(e) {}
+        }
     }
 
-    function getDragAfterElement(container, x) {
-        var draggableElements = Array.from(container.children).filter(function(child) {
-            return child !== draggedElement && child.classList.contains('ifacebox');
-        });
+    element.addEventListener('pointerdown', function(ev) {
+        if (ev.target.classList.contains('port-info-btn')) return;
+        if (ev.target.closest && ev.target.closest('.port-info-btn')) return;
+        if (ev.button !== undefined && ev.button !== 0) return;
+        // If user clicked the label directly, allow label edit — but still enable drag on move
+        startDrag(ev);
+    });
+    element.addEventListener('pointermove', moveDrag);
+    element.addEventListener('pointerup', endDrag);
+    element.addEventListener('pointercancel', endDrag);
 
-        return draggableElements.reduce(function(closest, child) {
-            var box = child.getBoundingClientRect();
-            var offset = x - box.left - box.width / 2;
-
-            if (offset < 0 && offset > closest.offset) {
-                return { offset: offset, element: child };
-            } else {
-                return closest;
-            }
-        }, { offset: Number.NEGATIVE_INFINITY }).element;
-    }
-
-    function onPointerDown(ev) {
-        if (ev.target.classList.contains('port-label') || ev.target.closest('.port-label')) {
-            return;
-        }
-
-        isTouch = (ev.type === 'touchstart');
-        
-        if (!isTouch && ev.button !== undefined && ev.button !== 0) {
-            return;
-        }
-
-        var clientX = ev.clientX;
-        var clientY = ev.clientY;
-        
-        if (isTouch && ev.touches && ev.touches.length > 0) {
-            clientX = ev.touches[0].clientX;
-            clientY = ev.touches[0].clientY;
-        }
-        
-        clickStart = { x: clientX, y: clientY };
-        hasMoved = false;
-
-        var delay = isTouch ? 600 : 300;
-        
-        clickTimer = setTimeout(function() {
-            if (!hasMoved) {
-                startDrag(ev);
-            }
-        }, delay);
-
-        if (isTouch) {
+    // Prevent click when drag actually happened
+    element.addEventListener('click', function(ev) {
+        if (isDragging) {
+            ev.stopPropagation();
             ev.preventDefault();
         }
-    }
-
-    function onPointerUp(ev) {
-        if (clickTimer) {
-            clearTimeout(clickTimer);
-            clickTimer = null;
-        }
-        hasMoved = false;
-        clickStart = null;
-    }
-
-    function onPointerMove(ev) {
-        if (clickTimer && clickStart) {
-            var clientX = ev.clientX;
-            var clientY = ev.clientY;
-            
-            if (isTouch && ev.touches && ev.touches.length > 0) {
-                clientX = ev.touches[0].clientX;
-                clientY = ev.touches[0].clientY;
-            }
-            
-            var distance = Math.sqrt(
-                Math.pow(clientX - clickStart.x, 2) + 
-                Math.pow(clientY - clickStart.y, 2)
-            );
-            
-            if (distance > 10) {
-                hasMoved = true;
-                clearTimeout(clickTimer);
-                clickTimer = null;
-            }
-        }
-    }
-
-    element.addEventListener('mousedown', onPointerDown);
-    element.addEventListener('touchstart', onPointerDown, { passive: false });
-    document.addEventListener('mouseup', onPointerUp);
-    document.addEventListener('touchend', onPointerUp);
-    document.addEventListener('mousemove', onPointerMove);
-    document.addEventListener('touchmove', onPointerMove, { passive: false });
+    }, true);
 }
 
 return baseclass.extend({
@@ -1281,6 +1346,14 @@ return baseclass.extend({
 	},
 
 	render: function(data) {
+		var formatBps = function(bps) {
+			if (!bps || bps < 1) return '0 B';
+			if (bps < 1024) return bps + ' B';
+			if (bps < 1048576) return (bps/1024).toFixed(1) + ' KB';
+			if (bps < 1073741824) return (bps/1048576).toFixed(1) + ' MB';
+			return (bps/1073741824).toFixed(2) + ' GB';
+		};
+
 		var isSwconfig = L.hasSystemFeature('swconfig');
 
 		var board = JSON.parse(data[1]),
@@ -1502,11 +1575,68 @@ return baseclass.extend({
 
 			portBox.__port__ = port;
 
+			var infoBtn = E('span', {
+				'class': 'port-info-btn',
+				'style': 'position:absolute;top:2px;right:2px;width:14px;height:14px;border-radius:50%;background:var(--border-color-medium);color:var(--text-color-primary);font-size:10px;line-height:14px;text-align:center;cursor:pointer;opacity:0.6;z-index:3;',
+				'title': _('Show port details'),
+				'click': function(ev) { ev.stopPropagation(); ev.preventDefault(); showDetailsModal(port); }
+			}, 'i');
+			portBox.appendChild(infoBtn);
+
+			var _cachedRx = _speedCache[port.device + '_rx'];
+			var _cachedTx = _speedCache[port.device + '_tx'];
+			var _initialSpeed = (_cachedRx === undefined && _cachedTx === undefined)
+				? '0 B/s'
+				: ('\u25b2 ' + formatBps(_cachedTx || 0) + '/s   \u25bc ' + formatBps(_cachedRx || 0) + '/s');
+			var speedDiv = E('div', {
+				'class': 'port-speed',
+				'data-device': port.device,
+				'style': 'font-size:70%; line-height:1.3; color: var(--text-color-secondary); padding: 0.15em 0.2em; text-align: center; white-space: pre-line; border-top: 1px solid var(--border-color-low); letter-spacing: -0.02em;'
+			}, _initialSpeed);
+			portBox.appendChild(speedDiv);
+
 			makeEditable(labelDiv, descriptionDiv, statusElement, port, known_ports);
 			makeDraggable(portBox, port, container, known_ports);
 			
 			container.appendChild(portBox);
 		});
+
+		// Start live speed polling
+		// Apply last known speed cache immediately (survives LuCI re-render)
+		var _applySpeed = function() {
+			var els = document.querySelectorAll('.port-speed');
+			for (var i = 0; i < els.length; i++) {
+				var el = els[i];
+				var dev = el.getAttribute('data-device');
+				var rx = _speedCache[dev + '_rx'];
+				var tx = _speedCache[dev + '_tx'];
+				if (rx === undefined && tx === undefined) continue;
+				var display = '\u25b2 ' + formatBps(tx || 0) + '/s\n\u25bc ' + formatBps(rx || 0) + '/s';
+				if (el.textContent !== display) el.textContent = display;
+			}
+		};
+		setTimeout(_applySpeed, 80);
+
+		// Start global speed poller ONCE
+		if (!_speedTimerStarted) {
+			_speedTimerStarted = true;
+			setInterval(function() {
+				L.resolveDefault(callGetPortSpeed(), {}).then(function(speeds) {
+					if (!speeds) return;
+					_speedCache = speeds;
+					var els = document.querySelectorAll('.port-speed');
+					for (var i = 0; i < els.length; i++) {
+						var el = els[i];
+						var dev = el.getAttribute('data-device');
+						var rx = speeds[dev + '_rx'];
+						var tx = speeds[dev + '_tx'];
+						if (rx === undefined && tx === undefined) continue;
+						var display = '\u25b2 ' + formatBps(tx || 0) + '/s   \u25bc ' + formatBps(rx || 0) + '/s';
+						if (el.textContent !== display) el.textContent = display;
+					}
+				}).catch(function() {});
+			}, 3000);
+		}
 
 		return wrapper;
 	}

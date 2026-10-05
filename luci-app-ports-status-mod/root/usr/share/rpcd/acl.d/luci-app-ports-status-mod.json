@@ -3,7 +3,8 @@
         "description": "Grant access to ports-status-mod RPC methods",
         "read": {
             "ubus": {
-                "ports-status-mod": [ "getPortsStatus" ]
+                "ports-status-mod": [ "getPortsStatus" ],
+                "ports-status-mod-ext": [ "getPortSpeed", "getSfpInfo", "getPoeStatus", "getPortDetails" ]
             }
         },
         "write": {
