@@ -27,6 +27,25 @@ jobs:
           FEEDNAME: ports
           PACKAGES: luci-app-ports-status-mod
 
+      - name: Build universal rootfs tarball
+        if: matrix.arch == 'aarch64_cortex-a53'
+        run: |
+          cd /tmp
+          rm -rf rootfs-build
+          mkdir -p rootfs-build
+          cd rootfs-build
+          IPK=$(find $GITHUB_WORKSPACE -name 'luci-app-ports-status-mod_*_all.ipk' | head -1)
+          tar -xzf "$IPK"
+          mkdir -p data && cd data
+          tar -xzf ../data.tar.gz
+          cd ..
+          VER=$(grep PKG_VERSION $GITHUB_WORKSPACE/luci-app-ports-status-mod/Makefile | cut -d: -f3)
+          REL=$(grep PKG_RELEASE $GITHUB_WORKSPACE/luci-app-ports-status-mod/Makefile | cut -d: -f3)
+          tar --owner=0 --group=0 --numeric-owner -czf \
+            $GITHUB_WORKSPACE/artifacts/luci-app-ports-status-mod-${VER}-r${REL}_rootfs.tar.gz \
+            -C data .
+          ls -la $GITHUB_WORKSPACE/artifacts/
+
       - name: Collect artifacts
         run: |
           mkdir -p ./artifacts
@@ -56,3 +75,18 @@ jobs:
         with:
           generate_release_notes: true
           files: ./artifacts/**/*
+          body: |
+            ## Installation
+
+            ### OpenWrt 24.10.x / ImmortalWrt (IPK)
+            opkg install luci-app-ports-status-mod_*.ipk
+
+            ### OpenWrt 25.12.x (APK)
+            apk add --allow-untrusted luci-app-ports-status-mod-*.apk
+
+            ### Universal RootFS Tarball (all architectures)
+            cd / && tar xzf luci-app-ports-status-mod-*_rootfs.tar.gz
+            /etc/init.d/rpcd restart
+            /etc/init.d/uhttpd restart
+
+            See README for full documentation.
