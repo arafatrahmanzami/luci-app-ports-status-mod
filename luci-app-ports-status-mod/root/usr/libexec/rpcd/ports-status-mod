@@ -99,18 +99,54 @@ get_swconfig_json() {
 
 set_port_status() {
     local port="$1" status="$2"
+
+    # rpcd sends params as JSON on stdin, not argv
+    if [ -z "$port" ] || [ -z "$status" ]; then
+        local stdin_json
+        stdin_json=$(cat 2>/dev/null)
+        if [ -n "$stdin_json" ]; then
+            json_load "$stdin_json" 2>/dev/null
+            json_get_var port "port"
+            json_get_var status "status"
+            json_cleanup
+        fi
+    fi
+
+    if [ -z "$port" ] || [ -z "$status" ]; then
+        json_init
+        json_add_boolean "success" 0
+        json_add_string "error" "missing port or status"
+        json_dump
+        return
+    fi
+
+    local device="${port%%@*}"
     touch "$STATE_FILE"
+
     if [ "$status" = "down" ]; then
-        grep -qx "$port" "$STATE_FILE" || echo "$port" >> "$STATE_FILE"
+        grep -qx "$device" "$STATE_FILE" || echo "$device" >> "$STATE_FILE"
+        ip link set dev "$device" down 2>/dev/null
         rm -f "$CACHE_FILE" "$PREV_FILE"
-        json_init; json_add_boolean "success" 1; json_dump
+        json_init
+        json_add_boolean "success" 1
+        json_add_string "port" "$device"
+        json_add_string "status" "down"
+        json_dump
     elif [ "$status" = "up" ]; then
-        grep -vx "$port" "$STATE_FILE" > "$STATE_FILE.tmp" 2>/dev/null
+        grep -vx "$device" "$STATE_FILE" > "$STATE_FILE.tmp" 2>/dev/null
         mv "$STATE_FILE.tmp" "$STATE_FILE" 2>/dev/null
+        ip link set dev "$device" up 2>/dev/null
         rm -f "$CACHE_FILE" "$PREV_FILE"
-        json_init; json_add_boolean "success" 1; json_dump
+        json_init
+        json_add_boolean "success" 1
+        json_add_string "port" "$device"
+        json_add_string "status" "up"
+        json_dump
     else
-        json_init; json_add_boolean "success" 0; json_dump
+        json_init
+        json_add_boolean "success" 0
+        json_add_string "error" "invalid status"
+        json_dump
     fi
 }
 

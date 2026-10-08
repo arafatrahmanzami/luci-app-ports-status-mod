@@ -66,3 +66,12 @@
 - Speed no longer flickers to `--` every 5 seconds
 
 [1.0.14]: https://github.com/arafatrahmanzami/luci-app-ports-status-mod/compare/v1.0.13...v1.0.14
+
+## [1.0.15] - 2026-10-08
+
+### Fixed
+- **Enable / disable LAN ports from the UI now actually toggles the interface** — previously the backend wrote to the state file only, without calling `ip link set`
+- `setPortStatus` now reads `port` + `status` from rpcd's stdin JSON (same bug that affected `getPortDetails`)
+- Returns structured `{success, port, status}` response for better frontend feedback
+
+[1.0.15]: https://github.com/arafatrahmanzami/luci-app-ports-status-mod/compare/v1.0.14...v1.0.15
